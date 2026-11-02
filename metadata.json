@@ -1,0 +1,6 @@
+{
+  "name": "ЧасПик — Учет смен и зарплаты",
+  "description": "Telegram Mini App для честного учета рабочих смен, расчета зарплаты и биржи смен для работников общепита и сферы услуг.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

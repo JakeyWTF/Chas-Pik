@@ -1,0 +1,57 @@
+@import "tailwindcss";
+
+:root {
+  --tg-theme-bg-color: #ffffff;
+  --tg-theme-text-color: #111827;
+  --tg-theme-hint-color: #6b7280;
+  --tg-theme-link-color: #2563eb;
+  --tg-theme-button-color: #10b981;
+  --tg-theme-button-text-color: #ffffff;
+  --tg-theme-secondary-bg-color: #f9fafb;
+  font-family: 'Plus Jakarta Sans', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --tg-theme-bg-color: #171d25;
+    --tg-theme-text-color: #f3f4f6;
+    --tg-theme-hint-color: #9ca3af;
+    --tg-theme-link-color: #3b82f6;
+    --tg-theme-button-color: #10b981;
+    --tg-theme-button-text-color: #ffffff;
+    --tg-theme-secondary-bg-color: #111822;
+  }
+}
+
+/* Telegram Mini App custom viewport and touch optimizations */
+body {
+  margin: 0;
+  padding: 0;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
+  background-color: var(--tg-theme-secondary-bg-color, #f9fafb);
+  color: var(--tg-theme-text-color, #111827);
+  overflow-x: hidden;
+}
+
+/* Smooth custom scrollbars */
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(156, 163, 175, 0.4);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(156, 163, 175, 0.7);
+}
