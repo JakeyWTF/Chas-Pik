@@ -292,7 +292,10 @@ export async function createPointInSupabase(params: {
 }
 
 /**
- * Joins an existing point by code, point PIN and personal password in Supabase
+ * Joins an existing point by code, point PIN and personal password in Supabase.
+ * Queries users table first:
+ * - If user ALREADY EXISTS: verifies password and logs them in WITHOUT duplicate INSERT!
+ * - If user DOES NOT EXIST: verifies point PIN, validates password strength, and inserts new user.
  */
 export async function joinPointInSupabase(params: {
   code: string;
@@ -305,17 +308,21 @@ export async function joinPointInSupabase(params: {
   tg_id?: string;
 }): Promise<{ user: User; workplace: any }> {
   const { code, pin_code, user_name, username, password, role_title, hourly_rate, tg_id } = params;
-  const cleanCode = code.trim().toUpperCase();
 
-  // Validate personal password
-  const passToUse = (password || '').trim() || pin_code.trim();
-  const passValidation = validatePasswordStrength(passToUse);
-  if (!passValidation.isValid) {
-    throw new Error(passValidation.message);
+  // 1. Sanitize & convert parameters to cleaned strings
+  const cleanCode = String(code || '').trim().toUpperCase();
+  const cleanPin = String(pin_code || '').trim();
+  const cleanUsername = String(username || '').trim();
+  const cleanPassword = String(password || '').trim() || cleanPin;
+
+  if (!cleanCode) {
+    throw new Error('Введите код точки');
   }
-  const passwordHash = hashPassword(passToUse);
+  if (!cleanUsername) {
+    throw new Error('Введите личный логин');
+  }
 
-  // 1. Find point in Supabase points table
+  // 2. Find point in Supabase points table by upper-case code
   const { data: pointData, error: pointError } = await supabase
     .from('points')
     .select('*')
@@ -326,8 +333,41 @@ export async function joinPointInSupabase(params: {
     throw new Error('Точка с таким кодом не найдена');
   }
 
-  // 2. Verify PIN against point members
-  const { data: existingUsers, error: usersErr } = await supabase
+  // 3. SELECT query: Check if user with this username ALREADY EXISTS in Supabase
+  const { data: existingUsers, error: userFetchError } = await supabase
+    .from('users')
+    .select('*')
+    .ilike('username', cleanUsername);
+
+  if (userFetchError) {
+    console.error('Error fetching existing users:', userFetchError);
+  }
+
+  // Find user matching username and point_code (or matching username)
+  const existingUser = existingUsers?.find((u) => u.point_code === pointData.code) || existingUsers?.[0];
+
+  if (existingUser) {
+    // USER ALREADY EXISTS -> Verify password and authorize without duplicate INSERT!
+    const isPassValid =
+      verifyPassword(cleanPassword, existingUser.password_hash) ||
+      (cleanPin && verifyPassword(cleanPin, existingUser.password_hash)) ||
+      String(existingUser.password_hash || '').trim() === cleanPassword ||
+      String(existingUser.password_hash || '').trim() === cleanPin;
+
+    if (!isPassValid) {
+      throw new Error('Неверный пароль пользователя');
+    }
+
+    const appUser = mapSupabaseUser(existingUser, pointData);
+    return {
+      user: appUser,
+      workplace: { id: pointData.id, code: pointData.code, name: pointData.name },
+    };
+  }
+
+  // 4. USER DOES NOT EXIST -> Primary registration for new employee joining point
+  // Fetch existing point members to verify point PIN code
+  const { data: pointUsers, error: usersErr } = await supabase
     .from('users')
     .select('*')
     .eq('point_code', pointData.code);
@@ -336,22 +376,48 @@ export async function joinPointInSupabase(params: {
     console.error('Error fetching point users:', usersErr);
   }
 
-  if (existingUsers && existingUsers.length > 0) {
-    const pinMatches = existingUsers.some((u) => {
-      const meta = parseUserMetadata(u);
-      if ((meta as any).point_pin && (meta as any).point_pin === pin_code.trim()) {
-        return true;
-      }
-      return u.password_hash === pin_code.trim() || verifyPassword(pin_code.trim(), u.password_hash);
-    });
-    if (!pinMatches) {
-      throw new Error('Неверный ПИН-код точки');
-    }
+  // Verify point PIN converting both values to trimmed strings
+  let pinMatches = false;
+
+  // Direct comparison on point row if pin column exists
+  if ((pointData as any).pin && String((pointData as any).pin).trim() === cleanPin) {
+    pinMatches = true;
   }
 
-  // 3. Prepare user metadata
+  // Check point members metadata and legacy hashes
+  if (!pinMatches && pointUsers && pointUsers.length > 0) {
+    pinMatches = pointUsers.some((u) => {
+      const meta = parseUserMetadata(u);
+      const userPointPin = String((meta as any).point_pin || '').trim();
+      if (userPointPin && userPointPin === cleanPin) {
+        return true;
+      }
+      if ((pointData as any).pin && String((pointData as any).pin).trim() === cleanPin) {
+        return true;
+      }
+      return (
+        String(u.password_hash || '').trim() === cleanPin ||
+        verifyPassword(cleanPin, u.password_hash)
+      );
+    });
+  } else if (!pointUsers || pointUsers.length === 0) {
+    pinMatches = true;
+  }
+
+  if (!pinMatches) {
+    throw new Error('Неверный ПИН-код точки');
+  }
+
+  // Validate personal password strength for NEW user registration
+  const passValidation = validatePasswordStrength(cleanPassword);
+  if (!passValidation.isValid) {
+    throw new Error(passValidation.message);
+  }
+  const passwordHash = hashPassword(cleanPassword);
+
+  // Prepare metadata for new user
   const meta = {
-    name: user_name.trim() || username.trim(),
+    name: user_name.trim() || cleanUsername,
     role_title: role_title?.trim() || 'Сотрудник',
     hourly_rate: Number(hourly_rate) || 350,
     default_rate_type: 'hourly',
@@ -359,16 +425,16 @@ export async function joinPointInSupabase(params: {
     sales_percent: 0,
     schedule_mode: 'weekly',
     fixed_pattern: '2/2',
-    tg_id: tg_id || username.trim(),
-    point_pin: pin_code.trim(),
+    tg_id: tg_id || cleanUsername,
+    point_pin: cleanPin,
   };
 
-  // 4. Create or update user in Supabase
+  // Perform INSERT for new employee
   const { data: userData, error: userError } = await supabase
     .from('users')
     .insert({
       point_code: pointData.code,
-      username: username.trim(),
+      username: cleanUsername,
       password_hash: passwordHash,
       role: 'employee',
       position: JSON.stringify(meta),

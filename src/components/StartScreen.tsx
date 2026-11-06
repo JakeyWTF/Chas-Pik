@@ -174,10 +174,9 @@ export const StartScreen: React.FC<StartScreenProps> = ({ tgId, onSuccess }) => 
       return;
     }
 
-    const passValidation = validatePasswordStrength(joinPassword);
-    if (!passValidation.isValid) {
-      setError(passValidation.message || 'Пароль должен содержать от 6 символов, буквы и цифры');
-      triggerHaptic('error');
+    const passToUse = joinPassword.trim() || joinPinCode.trim();
+    if (!passToUse) {
+      setError('Введите пароль или ПИН-код');
       return;
     }
 
@@ -198,12 +197,13 @@ export const StartScreen: React.FC<StartScreenProps> = ({ tgId, onSuccess }) => 
 
       triggerHaptic('success');
       localStorage.setItem('chaspik_tg_id', user.username || user.tg_id);
+      localStorage.setItem('chaspik_user', JSON.stringify(user));
       onSuccess(workplace, user);
     } catch (err: any) {
       if (isDuplicateUsernameError(err)) {
         setError(DUPLICATE_USERNAME_MESSAGE);
       } else {
-        setError(err.message || 'Неверный код точки или пин-код');
+        setError(err.message || 'Неверный код точки, логин или пароль');
       }
       triggerHaptic('error');
     } finally {
