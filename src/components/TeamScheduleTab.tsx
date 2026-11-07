@@ -7,6 +7,7 @@ import {
 import { PlannedShift, User, ScheduleMode, PlanStats, FixedPattern } from '../types';
 import { triggerHaptic } from '../lib/telegram';
 import { PlannedShiftModal } from './PlannedShiftModal';
+import { normalizeRateType } from '../services/supabaseService';
 import confetti from 'canvas-confetti';
 
 interface TeamScheduleTabProps {
@@ -26,6 +27,11 @@ interface TeamScheduleTabProps {
     end_time: string;
     comment?: string;
     schedule_type?: ScheduleMode;
+    hourly_rate?: number;
+    shift_flat_rate?: number;
+    sales_percent?: number;
+    rate_type?: any;
+    planned_earned?: number;
   }) => Promise<void>;
   onDeletePlannedShift: (shiftId: string) => Promise<void>;
   onGeneratePattern?: (data: {
@@ -105,6 +111,7 @@ export const TeamScheduleTab: React.FC<TeamScheduleTabProps> = ({
   const [modalOpen, setModalOpen] = useState(false);
   const [selectedDateForModal, setSelectedDateForModal] = useState<string>('');
   const [selectedShiftForModal, setSelectedShiftForModal] = useState<PlannedShift | undefined>(undefined);
+  const [selectedUserIdForModal, setSelectedUserIdForModal] = useState<string | undefined>(undefined);
 
   // Selected Day Details Drawer for Fixed Month View
   const [selectedMonthDate, setSelectedMonthDate] = useState<string | null>(null);
@@ -272,10 +279,27 @@ export const TeamScheduleTab: React.FC<TeamScheduleTabProps> = ({
     }
   };
 
-  const handleOpenAddModal = (dateStr: string, existing?: PlannedShift) => {
+  const getShiftEarned = (shift: PlannedShift): number => {
+    if (shift.planned_earned !== undefined && shift.planned_earned !== null) {
+      return shift.planned_earned;
+    }
+    const mem = teamMembers.find((u) => u.id === shift.user_id) || (shift.user_id === currentUser?.id ? currentUser : null);
+    const rType = shift.rate_type || shift.default_rate_type || (mem as any)?.payment_type || mem?.default_rate_type || 'hourly';
+    const norm = normalizeRateType(rType);
+    const hours = shift.hours_worked || 0;
+    const hourly = shift.hourly_rate ?? mem?.hourly_rate ?? 350;
+    const flat = shift.shift_flat_rate ?? (mem as any)?.fixed_rate ?? mem?.shift_flat_rate ?? (norm === 'fixed_shift' ? 1700 : 0);
+
+    if (norm === 'fixed_shift') return Math.round(flat);
+    if (norm === 'combined') return Math.round(hours * hourly + flat);
+    return Math.round(hours * hourly);
+  };
+
+  const handleOpenAddModal = (dateStr: string, existing?: PlannedShift, preselectedUserId?: string) => {
     triggerHaptic('light');
     setSelectedDateForModal(dateStr);
     setSelectedShiftForModal(existing);
+    setSelectedUserIdForModal(preselectedUserId);
     setModalOpen(true);
   };
 
@@ -819,7 +843,7 @@ export const TeamScheduleTab: React.FC<TeamScheduleTabProps> = ({
                                   {shift.start_time} – {shift.end_time}
                                 </span>
                                 <span className="text-[10px] text-blue-600 dark:text-blue-400 font-mono">
-                                  ~ {(shift.planned_earned || Math.round((shift.hours_worked || 0) * ((shift.user_id === currentUser?.id ? currentUser?.hourly_rate : shift.hourly_rate) || currentUser?.hourly_rate || 350))).toLocaleString('ru-RU')} ₽
+                                  ~ {getShiftEarned(shift).toLocaleString('ru-RU')} ₽
                                 </span>
                               </div>
                             </div>
@@ -1225,7 +1249,7 @@ export const TeamScheduleTab: React.FC<TeamScheduleTabProps> = ({
                       <div className="flex items-center justify-between text-[11px] text-neutral-300">
                         <span>Планируемый доход:</span>
                         <b className="font-mono text-blue-300">
-                          ~ {(shift.planned_earned || Math.round((shift.hours_worked || 0) * ((shift.user_id === currentUser?.id ? currentUser?.hourly_rate : shift.hourly_rate) || currentUser?.hourly_rate || 350))).toLocaleString('ru-RU')} ₽
+                          ~ {getShiftEarned(shift).toLocaleString('ru-RU')} ₽
                         </b>
                       </div>
 
@@ -1320,9 +1344,13 @@ export const TeamScheduleTab: React.FC<TeamScheduleTabProps> = ({
           isOpen={modalOpen}
           dateStr={selectedDateForModal}
           existingPlannedShift={selectedShiftForModal}
+          initialUserId={selectedUserIdForModal}
           currentUser={currentUser}
           teamMembers={teamMembers}
-          onClose={() => setModalOpen(false)}
+          onClose={() => {
+            setModalOpen(false);
+            setSelectedUserIdForModal(undefined);
+          }}
           onSave={handleSaveModalShift}
           onDelete={onDeletePlannedShift}
         />

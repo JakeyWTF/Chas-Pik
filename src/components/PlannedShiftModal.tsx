@@ -1,12 +1,14 @@
 import React, { useState, useEffect } from 'react';
-import { X, Plus, Minus, CheckCircle2, Trash2, Calendar, User as UserIcon, Sparkles } from 'lucide-react';
-import { PlannedShift, User, ScheduleMode } from '../types';
+import { X, Plus, Minus, CheckCircle2, Trash2, Calendar, User as UserIcon, Sparkles, Clock, DollarSign, Percent, Zap } from 'lucide-react';
+import { PlannedShift, User, ScheduleMode, RateType } from '../types';
 import { triggerHaptic } from '../lib/telegram';
+import { normalizeRateType } from '../services/supabaseService';
 
 interface PlannedShiftModalProps {
   isOpen: boolean;
   dateStr: string; // YYYY-MM-DD
   existingPlannedShift?: PlannedShift;
+  initialUserId?: string;
   currentUser: User | null;
   teamMembers: User[];
   onClose: () => void;
@@ -18,6 +20,11 @@ interface PlannedShiftModalProps {
     end_time: string;
     comment?: string;
     schedule_type?: ScheduleMode;
+    hourly_rate?: number;
+    shift_flat_rate?: number;
+    sales_percent?: number;
+    rate_type?: RateType;
+    planned_earned?: number;
   }) => Promise<void>;
   onDelete?: (shiftId: string) => Promise<void>;
 }
@@ -31,16 +38,16 @@ export const PlannedShiftModal: React.FC<PlannedShiftModalProps> = ({
   isOpen,
   dateStr,
   existingPlannedShift,
+  initialUserId,
   currentUser,
   teamMembers,
   onClose,
   onSave,
   onDelete,
 }) => {
-
-  const [selectedUserId, setSelectedUserId] = useState<string>(
-    existingPlannedShift?.user_id || currentUser?.id || ''
-  );
+  const [selectedUserId, setSelectedUserId] = useState<string>(() => {
+    return existingPlannedShift?.user_id || initialUserId || currentUser?.id || (teamMembers[0]?.id ?? '');
+  });
   const [isDayOff, setIsDayOff] = useState<boolean>(
     existingPlannedShift?.is_day_off === 1
   );
@@ -55,48 +62,139 @@ export const PlannedShiftModal: React.FC<PlannedShiftModalProps> = ({
   );
   const [isSaving, setIsSaving] = useState(false);
 
-  // Determine whether current selection is the logged-in user
-  const isSelectedCurrentUser = !selectedUserId || selectedUserId === currentUser?.id;
+  // Rate parameters state
+  const [rateType, setRateType] = useState<RateType>('hourly');
+  const [hourlyRate, setHourlyRate] = useState<number>(350);
+  const [shiftFlatRate, setShiftFlatRate] = useState<number>(1700);
+  const [salesPercent, setSalesPercent] = useState<number>(3);
+  const [plannedSales, setPlannedSales] = useState<number>(0);
+  const [isRateOverridden, setIsRateOverridden] = useState<boolean>(false);
 
-  // Selected user info (strictly prioritize currentUser for self)
-  const targetUser = isSelectedCurrentUser
-    ? currentUser
-    : (teamMembers.find((u) => u.id === selectedUserId) || currentUser);
+  // Helper to find employee object across teamMembers and currentUser
+  const findUserObj = (uid: string): User | null => {
+    if (!uid) return currentUser;
+    if (currentUser && (currentUser.id === uid || currentUser.username === uid || currentUser.tg_id === uid)) {
+      return currentUser;
+    }
+    const found = teamMembers.find((u) => u.id === uid || u.username === uid || u.tg_id === uid);
+    return found || currentUser;
+  };
 
-  // Hourly rate synchronized with user settings
-  const userRateFromSettings = (isSelectedCurrentUser
-    ? currentUser?.hourly_rate
-    : targetUser?.hourly_rate) ?? currentUser?.hourly_rate ?? 350;
+  // Helper to extract rates from user and existing shift
+  const extractRates = (user: User | null, shift?: PlannedShift) => {
+    if (shift) {
+      const rawType = shift.default_rate_type || shift.rate_type || (user as any)?.payment_type || user?.default_rate_type || 'hourly';
+      const resolvedType = normalizeRateType(rawType);
+      const resolvedHourly = shift.hourly_rate !== undefined && shift.hourly_rate !== null
+        ? Number(shift.hourly_rate)
+        : Number(user?.hourly_rate ?? 350);
 
-  const [hourlyRate, setHourlyRate] = useState<number>(userRateFromSettings);
+      const candidateFlat = shift.shift_flat_rate !== undefined && shift.shift_flat_rate !== null
+        ? Number(shift.shift_flat_rate)
+        : Number((user as any)?.fixed_rate ?? user?.shift_flat_rate ?? 0);
+      const resolvedFlat = candidateFlat > 0 ? candidateFlat : (resolvedType === 'fixed_shift' ? 1700 : 0);
 
-  // Sync state whenever existingPlannedShift or dateStr changes
+      const resolvedPercent = shift.sales_percent !== undefined && shift.sales_percent !== null
+        ? Number(shift.sales_percent)
+        : Number(user?.sales_percent ?? 3);
+
+      return {
+        resolvedType,
+        resolvedHourly: Math.max(0, resolvedHourly),
+        resolvedFlat: Math.max(0, resolvedFlat),
+        resolvedPercent: Math.max(0, resolvedPercent),
+      };
+    }
+
+    // New shift: strictly pull rates from the employee profile
+    const rawType = (user as any)?.payment_type || user?.default_rate_type || 'hourly';
+    const resolvedType = normalizeRateType(rawType);
+    const resolvedHourly = user?.hourly_rate !== undefined && user?.hourly_rate !== null
+      ? Number(user.hourly_rate)
+      : 350;
+
+    const candidateFlat = (user as any)?.fixed_rate !== undefined && (user as any)?.fixed_rate !== null && Number((user as any)?.fixed_rate) > 0
+      ? Number((user as any).fixed_rate)
+      : (user?.shift_flat_rate !== undefined && user?.shift_flat_rate !== null && Number(user.shift_flat_rate) > 0
+        ? Number(user.shift_flat_rate)
+        : (resolvedType === 'fixed_shift' ? 1700 : 0));
+
+    const resolvedPercent = user?.sales_percent !== undefined && user?.sales_percent !== null
+      ? Number(user.sales_percent)
+      : 3;
+
+    return {
+      resolvedType,
+      resolvedHourly: Math.max(0, resolvedHourly),
+      resolvedFlat: Math.max(0, candidateFlat),
+      resolvedPercent: Math.max(0, resolvedPercent),
+    };
+  };
+
+  // Sync state whenever modal opens or shift/date/user changes
   useEffect(() => {
+    if (!isOpen) return;
+
     if (existingPlannedShift) {
       setSelectedUserId(existingPlannedShift.user_id);
       setIsDayOff(existingPlannedShift.is_day_off === 1);
       setStartTime(existingPlannedShift.start_time || '12:00');
       setEndTime(existingPlannedShift.end_time || '00:00');
       setComment(existingPlannedShift.comment || '');
+
+      const userObj = findUserObj(existingPlannedShift.user_id);
+      const rates = extractRates(userObj, existingPlannedShift);
+      setRateType(rates.resolvedType);
+      setHourlyRate(rates.resolvedHourly);
+      setShiftFlatRate(rates.resolvedFlat);
+      setSalesPercent(rates.resolvedPercent);
+      setIsRateOverridden(false);
     } else {
-      setSelectedUserId(currentUser?.id || (teamMembers[0]?.id ?? ''));
+      const targetId = initialUserId || currentUser?.id || (teamMembers[0]?.id ?? '');
+      setSelectedUserId(targetId);
       setIsDayOff(false);
       setStartTime('12:00');
       setEndTime('00:00');
       setComment('');
+
+      const userObj = findUserObj(targetId);
+      const rates = extractRates(userObj);
+      setRateType(rates.resolvedType);
+      setHourlyRate(rates.resolvedHourly);
+      setShiftFlatRate(rates.resolvedFlat);
+      setSalesPercent(rates.resolvedPercent);
+      setPlannedSales(0);
+      setIsRateOverridden(false);
     }
-  }, [existingPlannedShift, dateStr, currentUser?.id, teamMembers]);
+  }, [isOpen, existingPlannedShift, dateStr, initialUserId, currentUser?.id, teamMembers]);
 
-  // Synchronize hourly rate whenever selected user or user settings hourly_rate updates
-  useEffect(() => {
-    const isSelf = !selectedUserId || selectedUserId === currentUser?.id;
-    const resolvedUser = isSelf
-      ? currentUser
-      : (teamMembers.find((u) => u.id === selectedUserId) || currentUser);
+  // Synchronize rates automatically whenever the selected employee changes
+  const handleUserChange = (newUserId: string) => {
+    setSelectedUserId(newUserId);
+    const userObj = findUserObj(newUserId);
+    const rates = extractRates(userObj);
+    setRateType(rates.resolvedType);
+    setHourlyRate(rates.resolvedHourly);
+    setShiftFlatRate(rates.resolvedFlat);
+    setSalesPercent(rates.resolvedPercent);
+    setIsRateOverridden(false);
+  };
 
-    const rate = (isSelf ? currentUser?.hourly_rate : resolvedUser?.hourly_rate) ?? currentUser?.hourly_rate ?? 350;
-    setHourlyRate(rate);
-  }, [selectedUserId, currentUser?.hourly_rate, teamMembers, currentUser]);
+  // Reset rates to current employee's profile
+  const handleResetToProfile = () => {
+    triggerHaptic('light');
+    const userObj = findUserObj(selectedUserId);
+    const rates = extractRates(userObj);
+    setRateType(rates.resolvedType);
+    setHourlyRate(rates.resolvedHourly);
+    setShiftFlatRate(rates.resolvedFlat);
+    setSalesPercent(rates.resolvedPercent);
+    setIsRateOverridden(false);
+  };
+
+  const isSelectedCurrentUser = !selectedUserId || selectedUserId === currentUser?.id;
+  const targetUser = findUserObj(selectedUserId);
+  const targetUserName = isSelectedCurrentUser ? 'Вы' : (targetUser?.name || 'Сотрудник');
 
   const [pY, pM, pD] = dateStr.split('-').map(Number);
   const dayNumber = pD || 1;
@@ -114,7 +212,25 @@ export const PlannedShiftModal: React.FC<PlannedShiftModalProps> = ({
   };
 
   const hoursWorked = isDayOff ? 0 : calculateDuration(startTime, endTime);
-  const estimatedEarned = isDayOff ? 0 : Math.round(hoursWorked * hourlyRate);
+
+  // Calculate estimated planned earnings based on employee payment_type / rateType
+  let estimatedEarned = 0;
+  if (!isDayOff) {
+    if (rateType === 'hourly') {
+      estimatedEarned = Math.round(hoursWorked * hourlyRate);
+    } else if (rateType === 'fixed_shift') {
+      // Оклад за выход: фиксированная сумма оклада за смену независимо от отработанных часов
+      estimatedEarned = Math.round(shiftFlatRate);
+    } else if (rateType === 'combined') {
+      // Комбинированная: часы * ставка + оклад за смену (+ процент от продаж при наличии)
+      const hourlyPart = hoursWorked * hourlyRate;
+      const percentPart = plannedSales > 0 ? (plannedSales * salesPercent) / 100 : 0;
+      estimatedEarned = Math.round(hourlyPart + shiftFlatRate + percentPart);
+    } else if (rateType === 'percent') {
+      // % от продаж
+      estimatedEarned = plannedSales > 0 ? Math.round((plannedSales * salesPercent) / 100) : 0;
+    }
+  }
 
   const adjustTime = (current: string, deltaMinutes: number): string => {
     const [h, m] = current.split(':').map(Number);
@@ -142,6 +258,9 @@ export const PlannedShiftModal: React.FC<PlannedShiftModalProps> = ({
             },
             body: JSON.stringify({
               hourly_rate: hourlyRate,
+              shift_flat_rate: shiftFlatRate,
+              default_rate_type: rateType,
+              sales_percent: salesPercent,
             }),
           });
         } catch (e) {
@@ -156,6 +275,11 @@ export const PlannedShiftModal: React.FC<PlannedShiftModalProps> = ({
         start_time: startTime,
         end_time: endTime,
         comment,
+        hourly_rate: hourlyRate,
+        shift_flat_rate: shiftFlatRate,
+        sales_percent: salesPercent,
+        rate_type: rateType,
+        planned_earned: estimatedEarned,
       });
       onClose();
     } catch (err) {
@@ -210,7 +334,7 @@ export const PlannedShiftModal: React.FC<PlannedShiftModalProps> = ({
               value={selectedUserId}
               onChange={(e) => {
                 triggerHaptic('light');
-                setSelectedUserId(e.target.value);
+                handleUserChange(e.target.value);
               }}
               className="w-full bg-neutral-800 text-white text-xs font-semibold p-3 rounded-xl border border-neutral-700 appearance-none focus:outline-none focus:border-blue-500"
             >
@@ -319,8 +443,16 @@ export const PlannedShiftModal: React.FC<PlannedShiftModalProps> = ({
               </div>
             </div>
 
+            {/* Duration and Night shift note */}
+            <div className="text-center text-xs text-neutral-400">
+              Длительность: <span className="font-bold text-white">{hoursWorked} ч</span>
+              {startTime >= '18:00' || endTime <= '06:00' ? (
+                <span className="text-amber-400 ml-1.5 font-semibold">🌙 ночная смена</span>
+              ) : null}
+            </div>
+
             {/* Calculated planned earnings preview */}
-            <div className="p-3.5 bg-blue-950/40 rounded-2xl border border-blue-800/40 space-y-2">
+            <div className="p-3.5 bg-blue-950/40 rounded-2xl border border-blue-800/40 space-y-2.5">
               <div className="flex items-center justify-between text-xs">
                 <span className="text-blue-300 font-semibold flex items-center gap-1.5">
                   <Sparkles className="w-3.5 h-3.5 text-blue-400" />
@@ -331,25 +463,211 @@ export const PlannedShiftModal: React.FC<PlannedShiftModalProps> = ({
                 </span>
               </div>
 
-              <div className="flex items-center justify-between text-[11px] text-blue-300/80 pt-1.5 border-t border-blue-800/30">
-                <div className="flex items-center gap-1.5 flex-wrap">
-                  <span className="text-neutral-300 font-medium">{hoursWorked}ч × {hourlyRate} ₽/ч</span>
-                  {isSelectedCurrentUser && (
+              {/* Profile Rate Source Indicator & Reset */}
+              <div className="flex items-center justify-between text-[11px] px-2.5 py-1.5 rounded-xl bg-blue-900/30 border border-blue-700/40 text-blue-200">
+                <span className="flex items-center gap-1.5 font-medium truncate mr-2">
+                  <span className={`w-2 h-2 rounded-full ${isRateOverridden ? 'bg-amber-400' : 'bg-emerald-400 animate-pulse'}`} />
+                  <span className="truncate">
+                    {isRateOverridden ? (
+                      <span className="text-amber-300 font-semibold">⚡ Ставка изменена для этой смены</span>
+                    ) : (
+                      <span>
+                        🟢 Ставка из профиля: <b className="text-white font-semibold">{targetUserName}</b>
+                      </span>
+                    )}
+                  </span>
+                </span>
+                {isRateOverridden && (
+                  <button
+                    type="button"
+                    onClick={handleResetToProfile}
+                    className="text-[10px] text-blue-300 hover:text-white underline font-semibold flex-shrink-0 cursor-pointer"
+                    title="Восстановить настройки ставки из профиля сотрудника"
+                  >
+                    Сбросить к профилю
+                  </button>
+                )}
+              </div>
+
+              {/* Rate type chips selector */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5 pt-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    triggerHaptic('light');
+                    setRateType('hourly');
+                    setIsRateOverridden(true);
+                  }}
+                  className={`py-1.5 px-2 rounded-lg text-[11px] font-bold transition flex items-center justify-center gap-1 cursor-pointer ${
+                    rateType === 'hourly'
+                      ? 'bg-blue-600 text-white shadow-xs'
+                      : 'bg-neutral-800/80 text-neutral-400 hover:text-white hover:bg-neutral-800'
+                  }`}
+                >
+                  <Clock className="w-3 h-3" />
+                  <span>Почасовая</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    triggerHaptic('light');
+                    setRateType('fixed_shift');
+                    setIsRateOverridden(true);
+                  }}
+                  className={`py-1.5 px-2 rounded-lg text-[11px] font-bold transition flex items-center justify-center gap-1 cursor-pointer ${
+                    rateType === 'fixed_shift'
+                      ? 'bg-blue-600 text-white shadow-xs'
+                      : 'bg-neutral-800/80 text-neutral-400 hover:text-white hover:bg-neutral-800'
+                  }`}
+                >
+                  <DollarSign className="w-3 h-3" />
+                  <span>Оклад за выход</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    triggerHaptic('light');
+                    setRateType('combined');
+                    setIsRateOverridden(true);
+                  }}
+                  className={`py-1.5 px-2 rounded-lg text-[11px] font-bold transition flex items-center justify-center gap-1 cursor-pointer ${
+                    rateType === 'combined'
+                      ? 'bg-blue-600 text-white shadow-xs'
+                      : 'bg-neutral-800/80 text-neutral-400 hover:text-white hover:bg-neutral-800'
+                  }`}
+                >
+                  <Zap className="w-3 h-3" />
+                  <span>Комбинированная</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    triggerHaptic('light');
+                    setRateType('percent');
+                    setIsRateOverridden(true);
+                  }}
+                  className={`py-1.5 px-2 rounded-lg text-[11px] font-bold transition flex items-center justify-center gap-1 cursor-pointer ${
+                    rateType === 'percent'
+                      ? 'bg-blue-600 text-white shadow-xs'
+                      : 'bg-neutral-800/80 text-neutral-400 hover:text-white hover:bg-neutral-800'
+                  }`}
+                >
+                  <Percent className="w-3 h-3" />
+                  <span>% от продаж</span>
+                </button>
+              </div>
+
+              {/* Exact Formula Explanation Hint */}
+              <div className="bg-neutral-900/60 p-2.5 rounded-xl border border-blue-900/40 text-xs">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="font-bold text-white font-mono">
+                    {rateType === 'hourly' && `${hoursWorked}ч × ${hourlyRate} ₽/ч`}
+                    {rateType === 'fixed_shift' && `Фиксированный оклад за смену: ${shiftFlatRate.toLocaleString('ru-RU')} ₽`}
+                    {rateType === 'combined' && `${hoursWorked}ч × ${hourlyRate} ₽/ч + оклад ${shiftFlatRate.toLocaleString('ru-RU')} ₽`}
+                    {rateType === 'percent' && `${salesPercent}% от продаж`}
+                  </span>
+                  {!isRateOverridden && (
                     <span className="text-[10px] px-1.5 py-0.2 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 font-semibold">
-                      из настроек пользователя
+                      по умолчанию из профиля
                     </span>
                   )}
                 </div>
-                <div className="flex items-center gap-1">
-                  <span className="text-neutral-400 text-[10px]">Ставка:</span>
-                  <input
-                    type="number"
-                    value={hourlyRate}
-                    onChange={(e) => setHourlyRate(Math.max(0, Number(e.target.value)))}
-                    className="w-16 bg-neutral-900 border border-blue-500/40 text-blue-300 font-mono text-center rounded-lg px-1 py-0.5 text-xs font-bold focus:outline-none focus:border-blue-400"
-                    title="Часовая ставка (синхронизирована с настройками пользователя)"
-                  />
-                  <span className="text-[10px] text-neutral-400">₽/ч</span>
+
+                {/* Additional descriptive note for fixed shift and combined */}
+                {rateType === 'fixed_shift' && (
+                  <div className="text-[11px] text-neutral-400 mt-1">
+                    Оклад фиксирован и не зависит от отработанных часов (длительность {hoursWorked} ч).
+                  </div>
+                )}
+                {rateType === 'combined' && (
+                  <div className="text-[11px] text-neutral-400 mt-1">
+                    Суммируется оплата за {hoursWorked} ч ({hoursWorked * hourlyRate} ₽) и фиксированный выход ({shiftFlatRate} ₽).
+                  </div>
+                )}
+                {rateType === 'percent' && (
+                  <div className="text-[11px] text-neutral-400 mt-1">
+                    Доход рассчитывается как {salesPercent}% от суммы продаж за смену.
+                  </div>
+                )}
+              </div>
+
+              {/* Editable Rate Inputs */}
+              <div className="flex items-center justify-between text-[11px] text-blue-300/80 pt-1.5 border-t border-blue-800/30 flex-wrap gap-2">
+                <span className="text-neutral-400 text-xs font-medium">Параметры ставки:</span>
+
+                <div className="flex items-center gap-2 flex-wrap">
+                  {/* Hourly Rate Input (for hourly and combined) */}
+                  {(rateType === 'hourly' || rateType === 'combined') && (
+                    <div className="flex items-center gap-1">
+                      <span className="text-neutral-400 text-[10px]">Час:</span>
+                      <input
+                        type="number"
+                        value={hourlyRate}
+                        onChange={(e) => {
+                          setHourlyRate(Math.max(0, Number(e.target.value)));
+                          setIsRateOverridden(true);
+                        }}
+                        className="w-16 bg-neutral-900 border border-blue-500/40 text-blue-300 font-mono text-center rounded-lg px-1 py-0.5 text-xs font-bold focus:outline-none focus:border-blue-400"
+                        title="Почасовая ставка"
+                      />
+                      <span className="text-[10px] text-neutral-400">₽/ч</span>
+                    </div>
+                  )}
+
+                  {/* Shift Flat Rate Input (for fixed_shift and combined) */}
+                  {(rateType === 'fixed_shift' || rateType === 'combined') && (
+                    <div className="flex items-center gap-1">
+                      <span className="text-neutral-400 text-[10px]">Оклад:</span>
+                      <input
+                        type="number"
+                        value={shiftFlatRate}
+                        onChange={(e) => {
+                          setShiftFlatRate(Math.max(0, Number(e.target.value)));
+                          setIsRateOverridden(true);
+                        }}
+                        className="w-20 bg-neutral-900 border border-blue-500/40 text-blue-300 font-mono text-center rounded-lg px-1 py-0.5 text-xs font-bold focus:outline-none focus:border-blue-400"
+                        title="Фиксированный оклад за смену (выход)"
+                      />
+                      <span className="text-[10px] text-neutral-400">₽</span>
+                    </div>
+                  )}
+
+                  {/* Percent Input (for percent and combined) */}
+                  {(rateType === 'percent' || rateType === 'combined') && (
+                    <div className="flex items-center gap-1">
+                      <span className="text-neutral-400 text-[10px]">% от кассы:</span>
+                      <input
+                        type="number"
+                        value={salesPercent}
+                        onChange={(e) => {
+                          setSalesPercent(Math.max(0, Number(e.target.value)));
+                          setIsRateOverridden(true);
+                        }}
+                        className="w-12 bg-neutral-900 border border-blue-500/40 text-blue-300 font-mono text-center rounded-lg px-1 py-0.5 text-xs font-bold focus:outline-none focus:border-blue-400"
+                        title="Процент от продаж"
+                      />
+                      <span className="text-[10px] text-neutral-400">%</span>
+                    </div>
+                  )}
+
+                  {/* Optional planned sales input for percent-based calculation */}
+                  {rateType === 'percent' && (
+                    <div className="flex items-center gap-1">
+                      <span className="text-neutral-400 text-[10px]">План кассы:</span>
+                      <input
+                        type="number"
+                        placeholder="0"
+                        value={plannedSales || ''}
+                        onChange={(e) => setPlannedSales(Math.max(0, Number(e.target.value)))}
+                        className="w-20 bg-neutral-900 border border-blue-500/40 text-blue-300 font-mono text-center rounded-lg px-1 py-0.5 text-xs font-bold focus:outline-none focus:border-blue-400"
+                        title="Ориентировочная касса смены для расчета"
+                      />
+                      <span className="text-[10px] text-neutral-400">₽</span>
+                    </div>
+                  )}
                 </div>
               </div>
             </div>

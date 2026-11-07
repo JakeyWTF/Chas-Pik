@@ -13,8 +13,10 @@ export interface User {
   role_title: string;
   role?: string;
   default_rate_type: RateType;
+  payment_type?: RateType;
   hourly_rate: number;
   shift_flat_rate: number;
+  fixed_rate?: number;
   sales_percent: number;
   workplace_name?: string;
   workplace_code?: string;
@@ -81,8 +83,10 @@ export interface PlannedShift {
   user_name?: string;
   role_title?: string;
   default_rate_type?: RateType;
+  rate_type?: RateType;
   hourly_rate?: number;
   shift_flat_rate?: number;
+  sales_percent?: number;
   schedule_type?: ScheduleMode;
   created_at: string;
   updated_at: string;

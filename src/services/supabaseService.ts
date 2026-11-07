@@ -1,6 +1,6 @@
 import { supabase } from '../lib/supabase';
 import bcrypt from 'bcryptjs';
-import { User, Shift, PlannedShift, MonthStats, PlanStats, FixedPattern, ScheduleMode } from '../types';
+import { User, Shift, PlannedShift, MonthStats, PlanStats, FixedPattern, ScheduleMode, RateType } from '../types';
 
 /**
  * Calculates hours worked between start and end time (handling overnight shifts).
@@ -32,14 +32,80 @@ export function formatTimeHHMM(timeStr?: string): string {
 }
 
 /**
+ * Normalizes payment/rate type from various English and Russian aliases
+ */
+export function normalizeRateType(val: any): RateType {
+  if (!val) return 'hourly';
+  const str = String(val).toLowerCase().trim();
+  if (
+    str === 'fixed_shift' ||
+    str === 'fixed' ||
+    str === 'flat' ||
+    str.includes('оклад') ||
+    str.includes('выход') ||
+    str.includes('фикс')
+  ) {
+    return 'fixed_shift';
+  }
+  if (str === 'combined' || str.includes('комбин')) {
+    return 'combined';
+  }
+  if (str === 'percent' || str.includes('%') || str.includes('процент') || str.includes('касс') || str.includes('продаж')) {
+    return 'percent';
+  }
+  return 'hourly';
+}
+
+/**
+ * Calculates planned earned money based on employee payment_type / rateType
+ */
+export function calculatePlannedEarned(params: {
+  hoursWorked: number;
+  rateType?: RateType | string;
+  hourlyRate?: number;
+  shiftFlatRate?: number;
+  salesPercent?: number;
+  plannedSales?: number;
+}): number {
+  const {
+    hoursWorked = 0,
+    rateType = 'hourly',
+    hourlyRate = 350,
+    shiftFlatRate = 0,
+    salesPercent = 0,
+    plannedSales = 0,
+  } = params;
+
+  const normalized = normalizeRateType(rateType);
+
+  if (normalized === 'hourly') {
+    return Math.round(hoursWorked * hourlyRate);
+  }
+  if (normalized === 'fixed_shift') {
+    return Math.round(shiftFlatRate);
+  }
+  if (normalized === 'combined') {
+    const hourlyPart = hoursWorked * hourlyRate;
+    const percentPart = plannedSales > 0 ? (plannedSales * salesPercent) / 100 : 0;
+    return Math.round(hourlyPart + shiftFlatRate + percentPart);
+  }
+  if (normalized === 'percent') {
+    return plannedSales > 0 ? Math.round((plannedSales * salesPercent) / 100) : 0;
+  }
+  return Math.round(hoursWorked * hourlyRate);
+}
+
+/**
  * Parses user position metadata which may contain JSON with extra profile settings
  */
 export function parseUserMetadata(row: any): {
   name: string;
   role_title: string;
   hourly_rate: number;
-  default_rate_type: 'hourly' | 'fixed_shift' | 'percent' | 'combined';
+  default_rate_type: RateType;
+  payment_type: RateType;
   shift_flat_rate: number;
+  fixed_rate: number;
   sales_percent: number;
   schedule_mode: ScheduleMode;
   fixed_pattern: FixedPattern;
@@ -48,31 +114,57 @@ export function parseUserMetadata(row: any): {
   let name = row.username || 'Сотрудник';
   let role_title = 'Сотрудник';
   let hourly_rate = 350;
-  let default_rate_type: 'hourly' | 'fixed_shift' | 'percent' | 'combined' = 'hourly';
+  let default_rate_type: RateType = 'hourly';
   let shift_flat_rate = 0;
   let sales_percent = 0;
   let schedule_mode: ScheduleMode = 'weekly';
   let fixed_pattern: FixedPattern = '2/2';
   let tg_id = row.username || row.id;
 
+  // Check direct row properties first if present
+  if (row.hourly_rate !== undefined && row.hourly_rate !== null) hourly_rate = Number(row.hourly_rate);
+  if (row.shift_flat_rate !== undefined && row.shift_flat_rate !== null) shift_flat_rate = Number(row.shift_flat_rate);
+  if (row.fixed_rate !== undefined && row.fixed_rate !== null) shift_flat_rate = Number(row.fixed_rate);
+  if (row.sales_percent !== undefined && row.sales_percent !== null) sales_percent = Number(row.sales_percent);
+  if (row.default_rate_type) default_rate_type = normalizeRateType(row.default_rate_type);
+  if (row.payment_type) default_rate_type = normalizeRateType(row.payment_type);
+  if (row.rate_type) default_rate_type = normalizeRateType(row.rate_type);
+
   if (row.position) {
     try {
-      if (row.position.startsWith('{')) {
+      if (typeof row.position === 'string' && row.position.startsWith('{')) {
         const meta = JSON.parse(row.position);
         if (meta.name) name = meta.name;
         if (meta.role_title) role_title = meta.role_title;
         if (meta.hourly_rate !== undefined && meta.hourly_rate !== null) hourly_rate = Number(meta.hourly_rate);
-        if (meta.default_rate_type) default_rate_type = meta.default_rate_type;
-        if (meta.shift_flat_rate !== undefined) shift_flat_rate = Number(meta.shift_flat_rate);
-        if (meta.sales_percent !== undefined) sales_percent = Number(meta.sales_percent);
+        if (meta.default_rate_type) default_rate_type = normalizeRateType(meta.default_rate_type);
+        if (meta.payment_type) default_rate_type = normalizeRateType(meta.payment_type);
+        if (meta.rate_type) default_rate_type = normalizeRateType(meta.rate_type);
+        if (meta.shift_flat_rate !== undefined && meta.shift_flat_rate !== null) shift_flat_rate = Number(meta.shift_flat_rate);
+        if (meta.fixed_rate !== undefined && meta.fixed_rate !== null) shift_flat_rate = Number(meta.fixed_rate);
+        if (meta.sales_percent !== undefined && meta.sales_percent !== null) sales_percent = Number(meta.sales_percent);
+        if (meta.schedule_mode) schedule_mode = meta.schedule_mode;
+        if (meta.fixed_pattern) fixed_pattern = meta.fixed_pattern;
+        if (meta.tg_id) tg_id = meta.tg_id;
+      } else if (typeof row.position === 'object' && row.position !== null) {
+        const meta = row.position;
+        if (meta.name) name = meta.name;
+        if (meta.role_title) role_title = meta.role_title;
+        if (meta.hourly_rate !== undefined && meta.hourly_rate !== null) hourly_rate = Number(meta.hourly_rate);
+        if (meta.default_rate_type) default_rate_type = normalizeRateType(meta.default_rate_type);
+        if (meta.payment_type) default_rate_type = normalizeRateType(meta.payment_type);
+        if (meta.rate_type) default_rate_type = normalizeRateType(meta.rate_type);
+        if (meta.shift_flat_rate !== undefined && meta.shift_flat_rate !== null) shift_flat_rate = Number(meta.shift_flat_rate);
+        if (meta.fixed_rate !== undefined && meta.fixed_rate !== null) shift_flat_rate = Number(meta.fixed_rate);
+        if (meta.sales_percent !== undefined && meta.sales_percent !== null) sales_percent = Number(meta.sales_percent);
         if (meta.schedule_mode) schedule_mode = meta.schedule_mode;
         if (meta.fixed_pattern) fixed_pattern = meta.fixed_pattern;
         if (meta.tg_id) tg_id = meta.tg_id;
       } else {
-        role_title = row.position;
+        role_title = String(row.position);
       }
     } catch {
-      role_title = row.position;
+      role_title = String(row.position);
     }
   }
 
@@ -81,7 +173,9 @@ export function parseUserMetadata(row: any): {
     role_title,
     hourly_rate,
     default_rate_type,
+    payment_type: default_rate_type,
     shift_flat_rate,
+    fixed_rate: shift_flat_rate,
     sales_percent,
     schedule_mode,
     fixed_pattern,
@@ -114,8 +208,10 @@ export function mapSupabaseUser(userRow: any, pointRow?: any): User {
     name: meta.name,
     role_title: meta.role_title,
     default_rate_type: meta.default_rate_type,
+    payment_type: meta.default_rate_type,
     hourly_rate: meta.hourly_rate,
     shift_flat_rate: meta.shift_flat_rate,
+    fixed_rate: meta.shift_flat_rate,
     sales_percent: meta.sales_percent,
     workplace_name: pointRow?.name || userRow.point_code || 'Точка',
     workplace_code: userRow.point_code || pointRow?.code || '',
@@ -817,13 +913,18 @@ export async function updateRateSettingsInSupabase(
   }
 
   const existingMeta = parseUserMetadata(currentUser);
+  const updatedRateType = normalizeRateType(settings.default_rate_type || existingMeta.default_rate_type);
+  const updatedFlatRate = settings.shift_flat_rate !== undefined ? Number(settings.shift_flat_rate) : existingMeta.shift_flat_rate;
+
   const updatedMeta = {
     ...existingMeta,
     role_title: settings.role_title !== undefined ? settings.role_title : existingMeta.role_title,
     hourly_rate: settings.hourly_rate !== undefined ? Number(settings.hourly_rate) : existingMeta.hourly_rate,
-    shift_flat_rate: settings.shift_flat_rate !== undefined ? Number(settings.shift_flat_rate) : existingMeta.shift_flat_rate,
+    shift_flat_rate: updatedFlatRate,
+    fixed_rate: updatedFlatRate,
     sales_percent: settings.sales_percent !== undefined ? Number(settings.sales_percent) : existingMeta.sales_percent,
-    default_rate_type: settings.default_rate_type || existingMeta.default_rate_type,
+    default_rate_type: updatedRateType,
+    payment_type: updatedRateType,
     schedule_mode: settings.schedule_mode || existingMeta.schedule_mode,
     fixed_pattern: settings.fixed_pattern || existingMeta.fixed_pattern,
   };
@@ -959,13 +1060,13 @@ export async function fetchShiftsFromSupabase(params: {
     .select('*')
     .eq('point_code', pointCode);
 
-  const userNameMap = new Map<string, { name: string; role_title: string }>();
+  const userFullMap = new Map<string, ReturnType<typeof parseUserMetadata>>();
   if (pointUsers) {
     pointUsers.forEach((u) => {
       const meta = parseUserMetadata(u);
-      userNameMap.set(u.id, { name: meta.name, role_title: meta.role_title });
+      userFullMap.set(u.id, meta);
       if (u.username) {
-        userNameMap.set(u.username, { name: meta.name, role_title: meta.role_title });
+        userFullMap.set(u.username, meta);
       }
     });
   }
@@ -976,10 +1077,23 @@ export async function fetchShiftsFromSupabase(params: {
   const plannedShifts: PlannedShift[] = plannedRows.map((row) => {
     const hours = Number(row.hours || 0);
     const hourlyRate = Number(row.hourly_rate || 350);
-    const plannedEarned = Math.round(hours * hourlyRate);
-    const userMeta = userNameMap.get(row.user_id) || userNameMap.get(row.username);
+    const userMeta = userFullMap.get(row.user_id) || userFullMap.get(row.username);
     const displayName = userMeta?.name || row.username;
     const roleTitle = userMeta?.role_title || 'Сотрудник';
+    const rateType = normalizeRateType(userMeta?.default_rate_type);
+    const shiftFlatRate = userMeta?.shift_flat_rate ?? 0;
+    const salesPercent = userMeta?.sales_percent ?? 0;
+
+    let plannedEarned = 0;
+    if (rateType === 'hourly') {
+      plannedEarned = Math.round(hours * hourlyRate);
+    } else if (rateType === 'fixed_shift') {
+      plannedEarned = Math.round(shiftFlatRate);
+    } else if (rateType === 'combined') {
+      plannedEarned = Math.round(hours * hourlyRate + shiftFlatRate);
+    } else if (rateType === 'percent') {
+      plannedEarned = 0;
+    }
 
     return {
       id: row.id,
@@ -996,7 +1110,10 @@ export async function fetchShiftsFromSupabase(params: {
       comment: '',
       user_name: displayName,
       role_title: roleTitle,
+      default_rate_type: rateType,
       hourly_rate: hourlyRate,
+      shift_flat_rate: shiftFlatRate,
+      sales_percent: salesPercent,
       schedule_type: row.is_fixed ? 'fixed' : 'weekly',
       created_at: row.created_at,
       updated_at: row.created_at,
@@ -1041,7 +1158,7 @@ export async function fetchShiftsFromSupabase(params: {
       factShiftsCount += 1;
     }
 
-    const userMeta = userNameMap.get(row.user_id) || userNameMap.get(row.username);
+    const userMeta = userFullMap.get(row.user_id) || userFullMap.get(row.username);
     const displayName = userMeta?.name || row.username;
 
     return {
@@ -1093,10 +1210,31 @@ export async function savePlannedShiftToSupabase(params: {
   start_time: string;
   end_time: string;
   hourly_rate?: number;
+  shift_flat_rate?: number;
+  sales_percent?: number;
+  rate_type?: RateType;
+  planned_earned?: number;
   schedule_type?: ScheduleMode;
   is_day_off?: number;
+  comment?: string;
 }): Promise<PlannedShift> {
-  const { point_code, user_id, username, date, start_time, end_time, hourly_rate = 350, schedule_type = 'weekly', is_day_off = 0 } = params;
+  const {
+    point_code,
+    user_id,
+    username,
+    date,
+    start_time,
+    end_time,
+    hourly_rate = 350,
+    shift_flat_rate = 0,
+    sales_percent = 0,
+    rate_type = 'hourly',
+    planned_earned,
+    schedule_type = 'weekly',
+    is_day_off = 0,
+  } = params;
+
+  const normalizedRateType = normalizeRateType(rate_type);
 
   if (is_day_off) {
     // If day off, remove existing planned shift for this date & user
@@ -1120,6 +1258,10 @@ export async function savePlannedShiftToSupabase(params: {
       planned_earned: 0,
       swap_status: 'none',
       user_name: username,
+      default_rate_type: normalizedRateType,
+      hourly_rate: Number(hourly_rate),
+      shift_flat_rate: Number(shift_flat_rate),
+      sales_percent: Number(sales_percent),
       schedule_type,
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
@@ -1129,6 +1271,16 @@ export async function savePlannedShiftToSupabase(params: {
   const hours = calculateHoursWorked(start_time, end_time);
   const formattedStart = formatTimeHHMM(start_time);
   const formattedEnd = formatTimeHHMM(end_time);
+
+  const calculatedPlannedEarned = planned_earned !== undefined
+    ? Math.round(planned_earned)
+    : calculatePlannedEarned({
+        hoursWorked: hours,
+        rateType: normalizedRateType,
+        hourlyRate: Number(hourly_rate),
+        shiftFlatRate: Number(shift_flat_rate),
+        salesPercent: Number(sales_percent),
+      });
 
   // Check if planned shift already exists for this date and user
   const { data: existing } = await supabase
@@ -1207,9 +1359,13 @@ export async function savePlannedShiftToSupabase(params: {
     start_time: formatTimeHHMM(resultRow.start_time),
     end_time: formatTimeHHMM(resultRow.end_time),
     hours_worked: Number(resultRow.hours),
-    planned_earned: Math.round(Number(resultRow.hours) * Number(resultRow.hourly_rate || 350)),
+    planned_earned: calculatedPlannedEarned,
     swap_status: resultRow.on_market ? 'seeking_swap' : 'none',
     user_name: resultRow.username,
+    default_rate_type: normalizedRateType,
+    hourly_rate: Number(hourly_rate),
+    shift_flat_rate: Number(shift_flat_rate),
+    sales_percent: Number(sales_percent),
     schedule_type,
     created_at: resultRow.created_at,
     updated_at: resultRow.created_at,

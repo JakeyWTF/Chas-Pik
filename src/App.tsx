@@ -348,11 +348,19 @@ export default function App() {
     end_time: string;
     comment?: string;
     schedule_type?: ScheduleMode;
+    hourly_rate?: number;
+    shift_flat_rate?: number;
+    sales_percent?: number;
+    rate_type?: RateType;
+    planned_earned?: number;
   }) => {
     if (!currentUser?.workplace_code) return;
     const targetMember = teamMembers.find((m) => m.id === planData.target_user_id) || currentUser;
     const targetUsername = targetMember.username || targetMember.name;
-    const targetRate = targetMember.hourly_rate || currentUser.hourly_rate || 350;
+    const targetRate = planData.hourly_rate ?? targetMember.hourly_rate ?? currentUser.hourly_rate ?? 350;
+    const targetFlatRate = planData.shift_flat_rate ?? targetMember.shift_flat_rate ?? 0;
+    const targetRateType = planData.rate_type ?? targetMember.default_rate_type ?? 'hourly';
+    const targetSalesPercent = planData.sales_percent ?? targetMember.sales_percent ?? 0;
 
     const saved = await savePlannedShiftToSupabase({
       point_code: currentUser.workplace_code,
@@ -362,8 +370,13 @@ export default function App() {
       start_time: planData.start_time || '12:00',
       end_time: planData.end_time || '00:00',
       hourly_rate: targetRate,
+      shift_flat_rate: targetFlatRate,
+      sales_percent: targetSalesPercent,
+      rate_type: targetRateType,
+      planned_earned: planData.planned_earned,
       schedule_type: planData.schedule_type || 'weekly',
       is_day_off: planData.is_day_off,
+      comment: planData.comment,
     });
 
     setPlannedShifts((prev) => {
