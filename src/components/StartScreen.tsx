@@ -164,19 +164,25 @@ export const StartScreen: React.FC<StartScreenProps> = ({ tgId, onSuccess }) => 
     e.preventDefault();
     setError('');
 
-    const trimmedUsername = joinUsername.trim();
-    if (!trimmedUsername) {
+    const cleanCode = joinPointCode.trim().toUpperCase();
+    const cleanPin = joinPinCode.trim();
+    const cleanUsername = joinUsername.trim();
+    const cleanPassword = joinPassword.trim() || cleanPin;
+
+    if (!cleanCode) {
+      setError('Введите код точки');
+      return;
+    }
+    if (!cleanPin) {
+      setError('Введите ПИН-код точки');
+      return;
+    }
+    if (!cleanUsername) {
       setError('Введите личный логин (обязательно)');
       return;
     }
-    if (!validateLatinUsername(trimmedUsername)) {
+    if (!validateLatinUsername(cleanUsername)) {
       setError('Логин должен быть на латинице (например: maria_bar)');
-      return;
-    }
-
-    const passToUse = joinPassword.trim() || joinPinCode.trim();
-    if (!passToUse) {
-      setError('Введите пароль или ПИН-код');
       return;
     }
 
@@ -185,17 +191,21 @@ export const StartScreen: React.FC<StartScreenProps> = ({ tgId, onSuccess }) => 
 
     try {
       const { user, workplace } = await joinPointInSupabase({
-        code: joinPointCode.trim().toUpperCase(),
-        pin_code: joinPinCode.trim(),
-        user_name: joinUserName.trim(),
-        username: trimmedUsername,
-        password: joinPassword.trim(),
+        code: cleanCode,
+        pin_code: cleanPin,
+        username: cleanUsername,
+        password: cleanPassword,
+        user_name: joinUserName.trim() || cleanUsername,
         role_title: joinRoleTitle.trim() || 'Сотрудник',
         hourly_rate: Number(joinHourlyRate) || 350,
-        tg_id: tgId || trimmedUsername,
+        tg_id: tgId || cleanUsername,
       });
 
       triggerHaptic('success');
+      // Save point_id to localStorage as required for second devices
+      if (workplace?.id) {
+        localStorage.setItem('point_id', String(workplace.id));
+      }
       localStorage.setItem('chaspik_tg_id', user.username || user.tg_id);
       localStorage.setItem('chaspik_user', JSON.stringify(user));
       onSuccess(workplace, user);
@@ -225,6 +235,9 @@ export const StartScreen: React.FC<StartScreenProps> = ({ tgId, onSuccess }) => 
       );
 
       triggerHaptic('success');
+      if (workplace?.id) {
+        localStorage.setItem('point_id', String(workplace.id));
+      }
       localStorage.setItem('chaspik_tg_id', user.username || user.tg_id);
       onSuccess(workplace, user);
     } catch (err: any) {
@@ -284,6 +297,9 @@ export const StartScreen: React.FC<StartScreenProps> = ({ tgId, onSuccess }) => 
       );
 
       triggerHaptic('success');
+      if (workplace?.id) {
+        localStorage.setItem('point_id', String(workplace.id));
+      }
       localStorage.setItem('chaspik_tg_id', user.username || user.tg_id);
       onSuccess(workplace, user);
     } catch (err: any) {
@@ -1000,12 +1016,12 @@ export const StartScreen: React.FC<StartScreenProps> = ({ tgId, onSuccess }) => 
               </div>
 
               <div>
-                <label className="block text-xs font-semibold text-gray-700 dark:text-gray-300 mb-1">
-                  Ваше имя в расписании:
+                <label className="block text-xs font-semibold text-gray-700 dark:text-gray-300 mb-1 flex items-center justify-between">
+                  <span>Ваше имя в расписании:</span>
+                  <span className="text-[10px] text-gray-400 font-normal">для новых сотрудников</span>
                 </label>
                 <input
                   type="text"
-                  required
                   placeholder="например: Мария"
                   value={joinUserName}
                   onChange={(e) => setJoinUserName(e.target.value)}

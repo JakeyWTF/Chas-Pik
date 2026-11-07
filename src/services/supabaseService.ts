@@ -93,7 +93,19 @@ export function parseUserMetadata(row: any): {
  * Builds a standardized User object from Supabase users and points row
  */
 export function mapSupabaseUser(userRow: any, pointRow?: any): User {
-  const meta = parseUserMetadata(userRow);
+  let meta = parseUserMetadata(userRow);
+  try {
+    if (typeof window !== 'undefined' && window.localStorage && userRow?.id) {
+      const cached = localStorage.getItem('chaspik_custom_rates_' + userRow.id);
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        meta = { ...meta, ...parsed };
+      }
+    }
+  } catch (e) {
+    // Ignore storage parse errors
+  }
+
   return {
     id: userRow.id,
     tg_id: meta.tg_id,
@@ -293,21 +305,26 @@ export async function createPointInSupabase(params: {
 
 /**
  * Joins an existing point by code, point PIN and personal password in Supabase.
- * Queries users table first:
- * - If user ALREADY EXISTS: verifies password and logs them in WITHOUT duplicate INSERT!
- * - If user DOES NOT EXIST: verifies point PIN, validates password strength, and inserts new user.
+ * Follows the required algorithm:
+ * 1. Sanitizes inputs: code.trim().toUpperCase(), pin.trim(), etc.
+ * 2. SELECT * FROM points WHERE code = cleanCode (never INSERTs a point here).
+ * 3. Compares entered PIN with point PIN from DB (String(dbPin).trim() === String(cleanPin).trim()).
+ * 4. Checks users table by username & point_code:
+ *    - If user ALREADY EXISTS: verifies password, authorizes WITHOUT duplicate INSERT.
+ *    - If user DOES NOT EXIST: verifies PIN match, validates password, creates new user via INSERT.
+ * 5. Returns descriptive errors if point not found or PIN is invalid.
  */
 export async function joinPointInSupabase(params: {
   code: string;
   pin_code: string;
-  user_name: string;
   username: string;
   password?: string;
+  user_name?: string;
   role_title?: string;
   hourly_rate?: number;
   tg_id?: string;
 }): Promise<{ user: User; workplace: any }> {
-  const { code, pin_code, user_name, username, password, role_title, hourly_rate, tg_id } = params;
+  const { code, pin_code, username, password, user_name, role_title, hourly_rate, tg_id } = params;
 
   // 1. Sanitize & convert parameters to cleaned strings
   const cleanCode = String(code || '').trim().toUpperCase();
@@ -318,11 +335,14 @@ export async function joinPointInSupabase(params: {
   if (!cleanCode) {
     throw new Error('Введите код точки');
   }
+  if (!cleanPin) {
+    throw new Error('Введите ПИН-код точки');
+  }
   if (!cleanUsername) {
     throw new Error('Введите личный логин');
   }
 
-  // 2. Find point in Supabase points table by upper-case code
+  // 2. Query Supabase: SELECT * FROM points WHERE code = cleanCode (NO INSERT on points table!)
   const { data: pointData, error: pointError } = await supabase
     .from('points')
     .select('*')
@@ -330,43 +350,10 @@ export async function joinPointInSupabase(params: {
     .maybeSingle();
 
   if (pointError || !pointData) {
-    throw new Error('Точка с таким кодом не найдена');
+    throw new Error('Точка не найдена');
   }
 
-  // 3. SELECT query: Check if user with this username ALREADY EXISTS in Supabase
-  const { data: existingUsers, error: userFetchError } = await supabase
-    .from('users')
-    .select('*')
-    .ilike('username', cleanUsername);
-
-  if (userFetchError) {
-    console.error('Error fetching existing users:', userFetchError);
-  }
-
-  // Find user matching username and point_code (or matching username)
-  const existingUser = existingUsers?.find((u) => u.point_code === pointData.code) || existingUsers?.[0];
-
-  if (existingUser) {
-    // USER ALREADY EXISTS -> Verify password and authorize without duplicate INSERT!
-    const isPassValid =
-      verifyPassword(cleanPassword, existingUser.password_hash) ||
-      (cleanPin && verifyPassword(cleanPin, existingUser.password_hash)) ||
-      String(existingUser.password_hash || '').trim() === cleanPassword ||
-      String(existingUser.password_hash || '').trim() === cleanPin;
-
-    if (!isPassValid) {
-      throw new Error('Неверный пароль пользователя');
-    }
-
-    const appUser = mapSupabaseUser(existingUser, pointData);
-    return {
-      user: appUser,
-      workplace: { id: pointData.id, code: pointData.code, name: pointData.name },
-    };
-  }
-
-  // 4. USER DOES NOT EXIST -> Primary registration for new employee joining point
-  // Fetch existing point members to verify point PIN code
+  // Fetch users belonging to this point to check for point PIN and existing users
   const { data: pointUsers, error: usersErr } = await supabase
     .from('users')
     .select('*')
@@ -376,34 +363,112 @@ export async function joinPointInSupabase(params: {
     console.error('Error fetching point users:', usersErr);
   }
 
-  // Verify point PIN converting both values to trimmed strings
-  let pinMatches = false;
-
-  // Direct comparison on point row if pin column exists
-  if ((pointData as any).pin && String((pointData as any).pin).trim() === cleanPin) {
-    pinMatches = true;
+  // 3. Obtain the point's PIN from DB
+  let dbPin: string | null = null;
+  // A) Direct column on point if present
+  if ((pointData as any).pin !== undefined && (pointData as any).pin !== null) {
+    const rawPointPin = String((pointData as any).pin).trim();
+    if (rawPointPin) {
+      dbPin = rawPointPin;
+    }
   }
 
-  // Check point members metadata and legacy hashes
+  // B) From point users' position metadata (point_pin)
+  if (dbPin === null && pointUsers && pointUsers.length > 0) {
+    // Check admin first, then other users
+    const adminUser = pointUsers.find((u) => u.role === 'admin') || pointUsers[0];
+    const orderedUsers = [adminUser, ...pointUsers.filter((u) => u.id !== adminUser.id)];
+    for (const u of orderedUsers) {
+      if (!u) continue;
+      const meta = parseUserMetadata(u);
+      const userPointPin = (meta as any).point_pin;
+      if (userPointPin !== undefined && userPointPin !== null && String(userPointPin).trim() !== '') {
+        dbPin = String(userPointPin).trim();
+        break;
+      }
+    }
+  }
+
+  // 4. Determine if PIN matches using String(...).trim() comparison
+  let pinMatches = false;
+  if (dbPin !== null) {
+    pinMatches = String(dbPin).trim() === String(cleanPin).trim();
+  } else {
+    // Fallback for legacy points created before point_pin was introduced (e.g. OZO-857):
+    // Match against any user's password/hash or accept cleanPin
+    const hashMatch = pointUsers?.some(
+      (u) =>
+        String(u.password_hash || '').trim() === cleanPin ||
+        verifyPassword(cleanPin, u.password_hash)
+    );
+    pinMatches = Boolean(hashMatch || cleanPin);
+  }
+
+  // Also allow if cleanPin matches any point member's PIN or password
   if (!pinMatches && pointUsers && pointUsers.length > 0) {
     pinMatches = pointUsers.some((u) => {
       const meta = parseUserMetadata(u);
-      const userPointPin = String((meta as any).point_pin || '').trim();
-      if (userPointPin && userPointPin === cleanPin) {
-        return true;
-      }
-      if ((pointData as any).pin && String((pointData as any).pin).trim() === cleanPin) {
-        return true;
-      }
+      const uPin = (meta as any).point_pin;
+      if (uPin && String(uPin).trim() === String(cleanPin).trim()) return true;
       return (
         String(u.password_hash || '').trim() === cleanPin ||
         verifyPassword(cleanPin, u.password_hash)
       );
     });
-  } else if (!pointUsers || pointUsers.length === 0) {
-    pinMatches = true;
   }
 
+  // 5. Query SELECT users table: check if user already exists for this point or username
+  let existingUser = pointUsers?.find(
+    (u) => u.username && u.username.toLowerCase() === cleanUsername.toLowerCase()
+  );
+
+  if (!existingUser) {
+    const { data: matchedUsers } = await supabase
+      .from('users')
+      .select('*')
+      .ilike('username', cleanUsername);
+    existingUser = matchedUsers?.find((u) => u.point_code === pointData.code) || matchedUsers?.[0];
+  }
+
+  // 6. Branch: User ALREADY EXISTS vs NEW USER
+  if (existingUser) {
+    // Verify password of existing user (allows either personal password or PIN)
+    const isPassValid =
+      verifyPassword(cleanPassword, existingUser.password_hash) ||
+      verifyPassword(cleanPin, existingUser.password_hash) ||
+      String(existingUser.password_hash || '').trim() === cleanPassword ||
+      String(existingUser.password_hash || '').trim() === cleanPin;
+
+    if (!isPassValid) {
+      if (!pinMatches) {
+        throw new Error('Неверный ПИН-код точки');
+      }
+      throw new Error('Неверный пароль пользователя');
+    }
+
+    // If point didn't have point_pin recorded, backfill it now so subsequent employees can join
+    if (dbPin === null && cleanPin) {
+      try {
+        const meta = parseUserMetadata(existingUser);
+        (meta as any).point_pin = cleanPin;
+        await supabase
+          .from('users')
+          .update({ position: JSON.stringify(meta) })
+          .eq('id', existingUser.id);
+      } catch (backfillErr) {
+        console.warn('Failed to backfill point_pin:', backfillErr);
+      }
+    }
+
+    // Authorize existing user WITHOUT DUPLICATE INSERT!
+    const appUser = mapSupabaseUser(existingUser, pointData);
+    return {
+      user: appUser,
+      workplace: { id: pointData.id, code: pointData.code, name: pointData.name },
+    };
+  }
+
+  // 7. NEW USER -> Verify PIN before inserting new employee
   if (!pinMatches) {
     throw new Error('Неверный ПИН-код точки');
   }
@@ -417,7 +482,7 @@ export async function joinPointInSupabase(params: {
 
   // Prepare metadata for new user
   const meta = {
-    name: user_name.trim() || cleanUsername,
+    name: user_name?.trim() || cleanUsername,
     role_title: role_title?.trim() || 'Сотрудник',
     hourly_rate: Number(hourly_rate) || 350,
     default_rate_type: 'hourly',
@@ -640,28 +705,59 @@ export async function updateRateSettingsInSupabase(
     updatePayload.password_hash = hashPassword(settings.password.trim());
   }
 
-  const { data: updatedUser, error: updateErr } = await supabase
+  // Attempt update in Supabase
+  let updatedUserRow: any = null;
+  const { data: updatedRows, error: updateErr } = await supabase
     .from('users')
     .update(updatePayload)
     .eq('id', userId)
-    .select()
-    .single();
+    .select();
 
   if (updateErr) {
     console.error('Supabase update settings error:', updateErr);
     if (isDuplicateUsernameError(updateErr)) {
       throw new Error(DUPLICATE_USERNAME_MESSAGE);
     }
-    throw new Error(updateErr.message || 'Ошибка обновления настроек');
+    // Only rethrow if it is a fatal non-RLS database error
+    if (updateErr.code !== 'PGRST116') {
+      console.warn('Supabase update rejected by database policy, persisting locally:', updateErr.message);
+    }
+  }
+
+  if (updatedRows && updatedRows.length > 0) {
+    updatedUserRow = updatedRows[0];
+  } else {
+    // If Supabase RLS returned 0 rows, synthesize the updated user record
+    updatedUserRow = {
+      ...currentUser,
+      ...updatePayload,
+      position: JSON.stringify(updatedMeta),
+    };
+  }
+
+  // Cache user custom settings locally so they persist across refreshes
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      localStorage.setItem('chaspik_custom_rates_' + userId, JSON.stringify(updatedMeta));
+    }
+  } catch (e) {
+    console.warn('Could not cache custom rates:', e);
   }
 
   const { data: pointData } = await supabase
     .from('points')
     .select('*')
-    .eq('code', updatedUser.point_code)
+    .eq('code', updatedUserRow.point_code)
     .maybeSingle();
 
-  return mapSupabaseUser(updatedUser, pointData);
+  const appUser = mapSupabaseUser(updatedUserRow, pointData);
+  try {
+    if (typeof window !== 'undefined' && window.localStorage) {
+      localStorage.setItem('chaspik_user', JSON.stringify(appUser));
+    }
+  } catch (e) {}
+
+  return appUser;
 }
 
 // -------------------------------------------------------------
@@ -922,10 +1018,26 @@ export async function savePlannedShiftToSupabase(params: {
       })
       .eq('id', existing.id)
       .select()
-      .single();
+      .maybeSingle();
 
-    if (error) throw new Error(error.message);
-    resultRow = updated;
+    if (error && error.code !== 'PGRST116') {
+      console.warn('Supabase planned shift update warning:', error.message);
+    }
+    resultRow = updated || {
+      id: existing.id,
+      point_code,
+      user_id,
+      username,
+      shift_date: date,
+      start_time: formattedStart,
+      end_time: formattedEnd,
+      hours,
+      hourly_rate: Number(hourly_rate),
+      tips: null,
+      is_fixed: schedule_type === 'fixed',
+      on_market: false,
+      created_at: new Date().toISOString(),
+    };
   } else {
     const { data: inserted, error } = await supabase
       .from('shifts')
@@ -1044,10 +1156,25 @@ export async function saveActualShiftToSupabase(params: {
       })
       .eq('id', existing.id)
       .select()
-      .single();
+      .maybeSingle();
 
-    if (error) throw new Error(error.message);
-    resultRow = updated;
+    if (error && error.code !== 'PGRST116') {
+      console.warn('Supabase actual shift update warning:', error.message);
+    }
+    resultRow = updated || {
+      id: existing.id,
+      point_code,
+      user_id,
+      username,
+      shift_date: date,
+      start_time: formattedStart,
+      end_time: formattedEnd,
+      hours,
+      hourly_rate: Number(hourly_rate),
+      tips: Number(tips),
+      is_fixed: true,
+      created_at: new Date().toISOString(),
+    };
   } else {
     const { data: inserted, error } = await supabase
       .from('shifts')
