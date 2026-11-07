@@ -11,6 +11,7 @@ export interface User {
   workplace_id?: string;
   name: string;
   role_title: string;
+  role?: string;
   default_rate_type: RateType;
   hourly_rate: number;
   shift_flat_rate: number;
@@ -20,6 +21,7 @@ export interface User {
   schedule_mode?: ScheduleMode;
   fixed_pattern?: FixedPattern;
   created_at: string;
+  is_superadmin?: boolean;
 }
 
 export interface Workplace {

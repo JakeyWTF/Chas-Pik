@@ -32,9 +32,10 @@ import {
 interface StartScreenProps {
   tgId: string;
   onSuccess: (workplace: any, user: User) => void;
+  onSuperadminLogin?: () => void;
 }
 
-export const StartScreen: React.FC<StartScreenProps> = ({ tgId, onSuccess }) => {
+export const StartScreen: React.FC<StartScreenProps> = ({ tgId, onSuccess, onSuperadminLogin }) => {
   const [activeForm, setActiveForm] = useState<'none' | 'create' | 'join' | 'login'>('none');
 
   // Sub-mode for login: 'direct' (by login + password) or 'point_team' (by point code + select user from Supabase)
@@ -225,16 +226,60 @@ export const StartScreen: React.FC<StartScreenProps> = ({ tgId, onSuccess }) => 
   const handleProfileLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
+
+    const cleanUser = loginUsername.trim();
+    const cleanPass = loginPassword.trim();
+
+    // 1. Superadmin mode check (admin / Start-153)
+    if (cleanUser.toLowerCase() === 'admin' && cleanPass === 'Start-153') {
+      triggerHaptic('success');
+      localStorage.setItem('chaspik_is_superadmin', 'true');
+      localStorage.setItem('chaspik_tg_id', 'superadmin');
+      if (onSuperadminLogin) {
+        onSuperadminLogin();
+      } else {
+        const superadminUser: User = {
+          id: 'superadmin',
+          tg_id: 'superadmin',
+          username: 'admin',
+          name: 'Суперадминистратор',
+          role: 'admin',
+          role_title: 'Суперадмин',
+          default_rate_type: 'hourly',
+          hourly_rate: 0,
+          shift_flat_rate: 0,
+          sales_percent: 0,
+          schedule_mode: 'weekly',
+          fixed_pattern: '2/2',
+          created_at: new Date().toISOString(),
+          is_superadmin: true,
+          workplace_name: 'Все точки',
+          workplace_code: 'ALL',
+          workplace_id: 'superadmin',
+        };
+        onSuccess({ id: 'superadmin', code: 'ALL', name: 'Все точки' }, superadminUser);
+      }
+      return;
+    }
+
     setIsLoading(true);
     triggerHaptic('medium');
 
     try {
       const { user, workplace } = await profileLoginInSupabase(
-        loginUsername.trim(),
-        loginPassword.trim()
+        cleanUser,
+        cleanPass
       );
 
       triggerHaptic('success');
+      if (user.is_superadmin) {
+        localStorage.setItem('chaspik_is_superadmin', 'true');
+        if (onSuperadminLogin) {
+          onSuperadminLogin();
+          return;
+        }
+      }
+
       if (workplace?.id) {
         localStorage.setItem('point_id', String(workplace.id));
       }

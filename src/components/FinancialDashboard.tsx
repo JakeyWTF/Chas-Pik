@@ -8,6 +8,7 @@ interface FinancialDashboardProps {
   monthName: string;
   user: User | null;
   onOpenRateSettings: () => void;
+  isSuperadmin?: boolean;
 }
 
 export const FinancialDashboard: React.FC<FinancialDashboardProps> = ({
@@ -15,6 +16,7 @@ export const FinancialDashboard: React.FC<FinancialDashboardProps> = ({
   monthName,
   user,
   onOpenRateSettings,
+  isSuperadmin = false,
 }) => {
   const avgPerShift = stats.shiftsCount > 0 ? Math.round(stats.totalEarned / stats.shiftsCount) : 0;
   const avgPerHour = stats.totalHours > 0 ? Math.round(stats.totalEarned / stats.totalHours) : 0;
@@ -36,13 +38,13 @@ export const FinancialDashboard: React.FC<FinancialDashboardProps> = ({
               <span>Заработано в {monthName}:</span>
             </div>
 
-            {user && (
+            {user && !isSuperadmin && (
               <button
                 onClick={() => {
                   triggerHaptic('light');
                   onOpenRateSettings();
                 }}
-                className="text-[11px] font-medium text-white/90 bg-white/15 hover:bg-white/25 px-2.5 py-0.5 rounded-full flex items-center gap-1 backdrop-blur transition"
+                className="text-[11px] font-medium text-white/90 bg-white/15 hover:bg-white/25 px-2.5 py-0.5 rounded-full flex items-center gap-1 backdrop-blur transition cursor-pointer"
               >
                 <span>{user.default_rate_type === 'hourly' ? `${user.hourly_rate} ₽/ч` : user.default_rate_type === 'percent' ? `${user.sales_percent}%` : 'Ставка'}</span>
                 <ChevronRight className="w-3 h-3 text-white/70" />

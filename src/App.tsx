@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { CalendarDays, Users } from 'lucide-react';
+import { CalendarDays, Users, ShieldCheck, ArrowLeft } from 'lucide-react';
 import { User, Shift, PlannedShift, MonthStats, PlanStats, RateType, ScheduleMode, FixedPattern, OnlinePresenceUser } from './types';
 import { initTelegramApp, getTelegramUser, triggerHaptic } from './lib/telegram';
 import { supabase } from './lib/supabase';
@@ -11,6 +11,7 @@ import { ShiftModal } from './components/ShiftModal';
 import { TeamScheduleTab } from './components/TeamScheduleTab';
 import { RateSettingsModal } from './components/RateSettingsModal';
 import { ExportSummaryModal } from './components/ExportSummaryModal';
+import { SuperadminPanel } from './components/SuperadminPanel';
 import {
   fetchUserFromSupabase,
   fetchTeamMembersFromSupabase,
@@ -25,6 +26,17 @@ import {
 } from './services/supabaseService';
 
 export default function App() {
+  // Superadmin Mode state
+  const [isSuperadmin, setIsSuperadmin] = useState<boolean>(() => {
+    return localStorage.getItem('chaspik_is_superadmin') === 'true';
+  });
+  const [isSuperadminOverviewOpen, setIsSuperadminOverviewOpen] = useState<boolean>(() => {
+    return (
+      localStorage.getItem('chaspik_is_superadmin') === 'true' &&
+      !localStorage.getItem('chaspik_superadmin_selected_point')
+    );
+  });
+
   // Active Telegram User ID or Username
   const [activeTgId, setActiveTgId] = useState<string>(() => {
     const tgUser = getTelegramUser();
@@ -163,6 +175,45 @@ export default function App() {
 
   // Fetch current user & workplace profile directly from Supabase
   const fetchUserProfile = useCallback(async (tgIdToFetch: string) => {
+    // Check if superadmin session was previously active
+    if (localStorage.getItem('chaspik_is_superadmin') === 'true') {
+      setIsSuperadmin(true);
+      const savedPointStr = localStorage.getItem('chaspik_superadmin_selected_point');
+      if (savedPointStr) {
+        try {
+          const point = JSON.parse(savedPointStr);
+          const superUser: User = {
+            id: 'superadmin-' + point.id,
+            tg_id: 'superadmin',
+            username: 'admin',
+            name: 'Суперадминистратор',
+            role: 'admin',
+            role_title: 'Суперадмин',
+            workplace_id: point.id,
+            workplace_code: point.code,
+            workplace_name: point.name,
+            default_rate_type: 'hourly',
+            hourly_rate: 0,
+            shift_flat_rate: 0,
+            sales_percent: 0,
+            schedule_mode: 'weekly',
+            fixed_pattern: '2/2',
+            created_at: new Date().toISOString(),
+            is_superadmin: true,
+          };
+          setCurrentUser(superUser);
+          setIsSuperadminOverviewOpen(false);
+          setIsInitializing(false);
+          return;
+        } catch (e) {
+          console.warn('Superadmin stored point error:', e);
+        }
+      }
+      setIsSuperadminOverviewOpen(true);
+      setIsInitializing(false);
+      return;
+    }
+
     if (!tgIdToFetch) {
       setCurrentUser(null);
       setIsInitializing(false);
@@ -410,8 +461,72 @@ export default function App() {
     }
   };
 
+  // Superadmin Action Handlers
+  const handleSuperadminLogin = () => {
+    setIsSuperadmin(true);
+    setIsSuperadminOverviewOpen(true);
+    localStorage.setItem('chaspik_is_superadmin', 'true');
+    localStorage.setItem('chaspik_tg_id', 'superadmin');
+  };
+
+  const handleSuperadminSelectPoint = (point: { id: string; code: string; name: string }) => {
+    triggerHaptic('medium');
+    localStorage.setItem('point_id', point.id);
+    localStorage.setItem('chaspik_superadmin_selected_point', JSON.stringify(point));
+
+    const superUser: User = {
+      id: 'superadmin-' + point.id,
+      tg_id: 'superadmin',
+      username: 'admin',
+      name: 'Суперадминистратор',
+      role: 'admin',
+      role_title: 'Суперадмин',
+      workplace_id: point.id,
+      workplace_code: point.code,
+      workplace_name: point.name,
+      default_rate_type: 'hourly',
+      hourly_rate: 0,
+      shift_flat_rate: 0,
+      sales_percent: 0,
+      schedule_mode: 'weekly',
+      fixed_pattern: '2/2',
+      created_at: new Date().toISOString(),
+      is_superadmin: true,
+    };
+
+    setCurrentUser(superUser);
+    setIsSuperadminOverviewOpen(false);
+    fetchShiftsData(currentMonthStr, superUser);
+    fetchTeamMembers(point.code);
+  };
+
+  const handleSuperadminLogout = () => {
+    try {
+      localStorage.removeItem('chaspik_is_superadmin');
+      localStorage.removeItem('chaspik_superadmin_selected_point');
+      localStorage.removeItem('chaspik_tg_id');
+      localStorage.removeItem('chaspik_user');
+      localStorage.removeItem('point_id');
+    } catch (e) {
+      console.warn('Superadmin storage cleanup error:', e);
+    }
+    setIsSuperadmin(false);
+    setIsSuperadminOverviewOpen(false);
+    setCurrentUser(null);
+    setActiveTgId('');
+    setMyShifts([]);
+    setPlannedShifts([]);
+    setStats({ totalEarned: 0, totalHours: 0, shiftsCount: 0 });
+    setPlanStats({ plannedTotalEarned: 0, plannedTotalHours: 0, plannedShiftsCount: 0 });
+  };
+
   // Logout handler
   const handleLogout = () => {
+    if (isSuperadmin) {
+      handleSuperadminLogout();
+      return;
+    }
+
     try {
       localStorage.removeItem('chaspik_tg_id');
       localStorage.removeItem('chaspik_user');
@@ -451,7 +566,20 @@ export default function App() {
     );
   }
 
-  // 2. If not authorized in a workplace: Show Start Screen
+  // 2. Superadmin Overview Screen (All Points list)
+  if (isSuperadmin && (isSuperadminOverviewOpen || !currentUser?.workplace_code)) {
+    return (
+      <SuperadminPanel
+        key="superadmin-panel-view"
+        onSelectPoint={handleSuperadminSelectPoint}
+        onLogout={handleSuperadminLogout}
+        currentPointCode={currentUser?.workplace_code}
+        onClose={currentUser?.workplace_code ? () => setIsSuperadminOverviewOpen(false) : undefined}
+      />
+    );
+  }
+
+  // 3. If not authorized in a workplace: Show Start Screen
   if (!currentUser) {
     const effectiveTgId = activeTgId || (getTelegramUser()?.id ? String(getTelegramUser()?.id) : `tg-${Math.floor(100000 + Math.random() * 900000)}`);
     return (
@@ -459,24 +587,70 @@ export default function App() {
         key="start-screen-view"
         tgId={effectiveTgId}
         onSuccess={handleWorkplaceJoined}
+        onSuperadminLogin={handleSuperadminLogin}
       />
     );
   }
 
   const editingShift = myShifts.find((s) => s.date === editingDate);
 
-  // 3. Main Interface with Bottom Tabs
+  // 4. Main Interface with Bottom Tabs
   return (
     <div key={`app-main-${currentUser.id}-${activeTab}`} className="min-h-screen bg-gray-50 dark:bg-neutral-950 text-gray-900 dark:text-neutral-100 flex flex-col font-sans transition-colors selection:bg-teal-500 selection:text-white">
       {/* Mobile container centered on desktop */}
       <div className="w-full max-w-md mx-auto flex-1 flex flex-col bg-white dark:bg-neutral-900 shadow-2xl relative min-h-screen border-x border-gray-100 dark:border-neutral-800">
         
+        {/* Superadmin Return Bar - Fully responsive, box-border, zero horizontal overflow */}
+        {isSuperadmin && (
+          <div className="w-full max-w-full box-border overflow-hidden bg-gradient-to-r from-purple-950 via-indigo-950 to-slate-900 text-white px-3 py-2.5 sm:px-4 sm:py-2.5 shadow-md sticky top-0 z-40 border-b border-purple-500/30">
+            <div className="w-full max-w-full box-border flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              {/* Row 1: Compact badge + Current point name & code */}
+              <div className="flex items-center gap-2 min-w-0 max-w-full flex-wrap">
+                <span className="px-2 py-0.5 rounded-full bg-gradient-to-r from-amber-400 to-amber-500 text-slate-950 font-mono font-black text-[9px] uppercase tracking-wider flex items-center gap-1 shadow-sm flex-shrink-0">
+                  <span>⚡</span>
+                  <span>СУПЕРАДМИН</span>
+                </span>
+                <div className="flex items-center gap-1.5 min-w-0 text-xs font-bold text-white truncate">
+                  <span className="text-purple-300/80 font-normal">Точка:</span>
+                  <span className="font-extrabold truncate text-white">
+                    {currentUser.workplace_name || 'Заведение'}
+                  </span>
+                  {currentUser.workplace_code && (
+                    <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-purple-900/60 text-purple-200 border border-purple-600/40 flex-shrink-0">
+                      {currentUser.workplace_code}
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* Row 2 on mobile / Right side on wider: Clean accessible button */}
+              <div className="w-full sm:w-auto flex items-center justify-end flex-shrink-0">
+                <button
+                  type="button"
+                  onClick={() => {
+                    triggerHaptic('light');
+                    setIsSuperadminOverviewOpen(true);
+                  }}
+                  className="w-full sm:w-auto px-3.5 py-1.5 rounded-xl bg-purple-500/25 hover:bg-purple-500/40 active:scale-[0.98] border border-purple-400/35 text-white font-bold text-xs transition flex items-center justify-center gap-1.5 cursor-pointer shadow-sm touch-manipulation select-none"
+                  title="Вернуться ко всем точкам"
+                >
+                  <ArrowLeft className="w-3.5 h-3.5 text-purple-300 flex-shrink-0" />
+                  <span>← К списку точек</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {/* App Header with Logo, Settings and Logout */}
         <Header
           user={currentUser}
           onlineCount={onlineCount}
-          onOpenRateSettings={() => setRateSettingsOpen(true)}
+          onOpenRateSettings={() => {
+            if (!isSuperadmin) setRateSettingsOpen(true);
+          }}
           onLogout={handleLogout}
+          isSuperadmin={isSuperadmin}
         />
 
         {/* Main Content Area */}
@@ -488,7 +662,10 @@ export default function App() {
                 stats={stats}
                 monthName={currentMonthLocative}
                 user={currentUser}
-                onOpenRateSettings={() => setRateSettingsOpen(true)}
+                onOpenRateSettings={() => {
+                  if (!isSuperadmin) setRateSettingsOpen(true);
+                }}
+                isSuperadmin={isSuperadmin}
               />
 
               {/* Month Interactive Calendar Grid (FACT + PLAN overlay) */}
@@ -583,7 +760,7 @@ export default function App() {
           />
         )}
 
-        {rateSettingsOpen && currentUser && (
+        {rateSettingsOpen && currentUser && !isSuperadmin && (
           <RateSettingsModal
             isOpen={rateSettingsOpen}
             user={currentUser}

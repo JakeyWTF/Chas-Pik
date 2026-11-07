@@ -9,6 +9,7 @@ interface HeaderProps {
   onlineCount?: number;
   onOpenRateSettings: () => void;
   onLogout: () => void;
+  isSuperadmin?: boolean;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -16,6 +17,7 @@ export const Header: React.FC<HeaderProps> = ({
   onlineCount = 1,
   onOpenRateSettings,
   onLogout,
+  isSuperadmin = false,
 }) => {
   const [copiedCode, setCopiedCode] = useState(false);
 
@@ -53,8 +55,8 @@ export const Header: React.FC<HeaderProps> = ({
       </div>
 
       <div className="flex items-center gap-1.5">
-        {/* User profile & rate settings unified badge */}
-        {user && (
+        {/* User profile & rate settings unified badge (hidden for superadmin in point viewing mode) */}
+        {user && !isSuperadmin && (
           <button
             onClick={() => {
               triggerHaptic('light');
@@ -81,8 +83,8 @@ export const Header: React.FC<HeaderProps> = ({
         <button
           onClick={handleLogoutClick}
           className="p-2 rounded-xl text-rose-500 dark:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 transition active:scale-95 cursor-pointer"
-          title="Выйти из точки"
-          aria-label="Выйти из точки"
+          title={isSuperadmin ? "Выйти из режима суперадминистратора" : "Выйти из точки"}
+          aria-label={isSuperadmin ? "Выйти из режима суперадминистратора" : "Выйти из точки"}
         >
           <LogOut className="w-4 h-4" />
         </button>

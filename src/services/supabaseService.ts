@@ -536,6 +536,33 @@ export async function profileLoginInSupabase(
     throw new Error('Введите личный пароль');
   }
 
+  // Superadmin mode check: username "admin" and password "Start-153"
+  if (cleanUsername.toLowerCase() === 'admin' && cleanPassword === 'Start-153') {
+    const superadminUser: User = {
+      id: 'superadmin',
+      tg_id: 'superadmin',
+      username: 'admin',
+      name: 'Суперадминистратор',
+      role: 'admin',
+      role_title: 'Суперадмин',
+      default_rate_type: 'hourly',
+      hourly_rate: 0,
+      shift_flat_rate: 0,
+      sales_percent: 0,
+      schedule_mode: 'weekly',
+      fixed_pattern: '2/2',
+      created_at: new Date().toISOString(),
+      is_superadmin: true,
+      workplace_name: 'Все точки',
+      workplace_code: 'ALL',
+      workplace_id: 'superadmin',
+    };
+    return {
+      user: superadminUser,
+      workplace: { id: 'superadmin', code: 'ALL', name: 'Все точки' },
+    };
+  }
+
   // 1. Search user in Supabase
   const { data: users, error: userError } = await supabase
     .from('users')
@@ -669,14 +696,124 @@ export async function updateRateSettingsInSupabase(
     fixed_pattern?: FixedPattern;
   }
 ): Promise<User> {
-  const { data: currentUser, error: getErr } = await supabase
+  // 1. Superadmin special handling (superadmin is a virtual system account)
+  if (userId.startsWith('superadmin') || userId === 'superadmin') {
+    const cachedStr = typeof window !== 'undefined' ? localStorage.getItem('chaspik_custom_rates_' + userId) : null;
+    let existingMeta: any = {};
+    if (cachedStr) {
+      try { existingMeta = JSON.parse(cachedStr); } catch (e) {}
+    }
+
+    const updatedMeta = {
+      ...existingMeta,
+      role_title: settings.role_title !== undefined ? settings.role_title : (existingMeta.role_title || 'Суперадмин'),
+      hourly_rate: settings.hourly_rate !== undefined ? Number(settings.hourly_rate) : (existingMeta.hourly_rate || 0),
+      shift_flat_rate: settings.shift_flat_rate !== undefined ? Number(settings.shift_flat_rate) : (existingMeta.shift_flat_rate || 0),
+      sales_percent: settings.sales_percent !== undefined ? Number(settings.sales_percent) : (existingMeta.sales_percent || 0),
+      default_rate_type: settings.default_rate_type || existingMeta.default_rate_type || 'hourly',
+      schedule_mode: settings.schedule_mode || existingMeta.schedule_mode || 'weekly',
+      fixed_pattern: settings.fixed_pattern || existingMeta.fixed_pattern || '2/2',
+    };
+
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        localStorage.setItem('chaspik_custom_rates_' + userId, JSON.stringify(updatedMeta));
+      }
+    } catch (e) {}
+
+    let workplaceCode = '';
+    let workplaceName = 'Все точки';
+    let workplaceId = 'superadmin';
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        const storedPoint = localStorage.getItem('chaspik_superadmin_selected_point');
+        if (storedPoint) {
+          const parsed = JSON.parse(storedPoint);
+          workplaceCode = parsed.code || '';
+          workplaceName = parsed.name || '';
+          workplaceId = parsed.id || '';
+        }
+      }
+    } catch (e) {}
+
+    const superUser: User = {
+      id: userId,
+      tg_id: 'superadmin',
+      username: settings.username ? settings.username.trim() : 'admin',
+      name: 'Суперадминистратор',
+      role: 'admin',
+      role_title: updatedMeta.role_title,
+      default_rate_type: updatedMeta.default_rate_type,
+      hourly_rate: updatedMeta.hourly_rate,
+      shift_flat_rate: updatedMeta.shift_flat_rate,
+      sales_percent: updatedMeta.sales_percent,
+      schedule_mode: updatedMeta.schedule_mode,
+      fixed_pattern: updatedMeta.fixed_pattern,
+      workplace_id: workplaceId,
+      workplace_code: workplaceCode,
+      workplace_name: workplaceName,
+      created_at: new Date().toISOString(),
+      is_superadmin: true,
+    };
+
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        localStorage.setItem('chaspik_user', JSON.stringify(superUser));
+      }
+    } catch (e) {}
+
+    return superUser;
+  }
+
+  // 2. Regular user lookup (by id, username, or local cached session)
+  let currentUser: any = null;
+  const { data: userById } = await supabase
     .from('users')
     .select('*')
     .eq('id', userId)
-    .single();
+    .maybeSingle();
 
-  if (getErr || !currentUser) {
-    throw new Error('Пользователь не найден');
+  currentUser = userById;
+
+  if (!currentUser) {
+    const { data: userByUsername } = await supabase
+      .from('users')
+      .select('*')
+      .ilike('username', userId)
+      .maybeSingle();
+    currentUser = userByUsername;
+  }
+
+  if (!currentUser) {
+    let localUser: any = null;
+    try {
+      if (typeof window !== 'undefined' && window.localStorage) {
+        const cached = localStorage.getItem('chaspik_user');
+        if (cached) localUser = JSON.parse(cached);
+      }
+    } catch (e) {}
+
+    if (localUser) {
+      currentUser = {
+        id: userId,
+        point_code: localUser.workplace_code || '',
+        username: localUser.username || userId,
+        role: localUser.role || 'employee',
+        position: JSON.stringify({
+          name: localUser.name || 'Сотрудник',
+          role_title: settings.role_title || localUser.role_title || 'Сотрудник',
+          hourly_rate: settings.hourly_rate ?? localUser.hourly_rate ?? 350,
+          shift_flat_rate: settings.shift_flat_rate ?? localUser.shift_flat_rate ?? 0,
+          sales_percent: settings.sales_percent ?? localUser.sales_percent ?? 0,
+          default_rate_type: settings.default_rate_type || localUser.default_rate_type || 'hourly',
+          schedule_mode: settings.schedule_mode || localUser.schedule_mode || 'weekly',
+          fixed_pattern: settings.fixed_pattern || localUser.fixed_pattern || '2/2',
+          tg_id: localUser.tg_id || userId,
+        }),
+      };
+    } else {
+      throw new Error('Пользователь не найден');
+    }
   }
 
   const existingMeta = parseUserMetadata(currentUser);
@@ -1437,4 +1574,53 @@ export async function resetPlannedShiftsInSupabase(params: {
   if (error) {
     throw new Error(error.message || 'Ошибка сброса смен');
   }
+}
+
+/**
+ * Superadmin service: Load all points from Supabase along with statistics
+ */
+export async function fetchAllPointsForSuperadmin(): Promise<Array<{
+  id: string;
+  code: string;
+  name: string;
+  created_at: string;
+  users_count: number;
+  shifts_count: number;
+}>> {
+  const { data: points, error: pointsErr } = await supabase
+    .from('points')
+    .select('*')
+    .order('created_at', { ascending: false });
+
+  if (pointsErr) {
+    console.error('Error fetching points for superadmin:', pointsErr);
+    throw new Error('Не удалось загрузить список точек');
+  }
+
+  // Fetch count of users and shifts for each point
+  const { data: users } = await supabase.from('users').select('id, point_code');
+  const { data: shifts } = await supabase.from('shifts').select('id, point_code');
+
+  const usersCountMap = new Map<string, number>();
+  (users || []).forEach((u) => {
+    if (u.point_code) {
+      usersCountMap.set(u.point_code, (usersCountMap.get(u.point_code) || 0) + 1);
+    }
+  });
+
+  const shiftsCountMap = new Map<string, number>();
+  (shifts || []).forEach((s) => {
+    if (s.point_code) {
+      shiftsCountMap.set(s.point_code, (shiftsCountMap.get(s.point_code) || 0) + 1);
+    }
+  });
+
+  return (points || []).map((p) => ({
+    id: p.id,
+    code: p.code,
+    name: p.name,
+    created_at: p.created_at,
+    users_count: usersCountMap.get(p.code) || 0,
+    shifts_count: shiftsCountMap.get(p.code) || 0,
+  }));
 }
